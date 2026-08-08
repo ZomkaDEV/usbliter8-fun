@@ -2,9 +2,43 @@
 
 > **CAUTION!**
 >
-> Running this (restoring a custom firmware) will delete your entire device and break everything: SEP, passcode, Wifi, Baseband, Bluetooth (partially work) and the entire Apple services, so please don't run it on your main device, ONLY do it on a spare **iPhone 11 Pro** only. This tutorial only targets developers that enjoy breaking their device!
+> Running this (restoring a custom firmware) will delete your entire device and break everything: SEP, passcode, Baseband, Bluetooth (partially work) and the entire Apple services, so please don't run it on your main device, ONLY do it on a spare device. This tutorial only targets developers that enjoy breaking their device!
 
-Currently only **iPhone 11 Pro** is supported. Other devices require finding the correct offsets to make it work.
+![iPhone 11 on iOS 27.0 beta 4, running Sileo, with a root shell over SSH](images/iphone11-sileo.jpg)
+
+Two devices are supported, as separate ports. The directories are **not** interchangeable: the display panel, the board-tagged firmware filenames and every offset differ.
+
+| Device | Board | iOS | Directory |
+| :---- | :---- | :---- | :---- |
+| **iPhone 11** | **`n104ap`** | **27.0 beta 4** (`24A5390f`) | **[`work-27.0b4-n104`](work-27.0b4-n104/)** |
+| iPhone 11 Pro / Pro Max | `d431ap` / `d421ap` | 27.0 beta 2, beta 3 | `work-27.0b2`, `work-27.0b3` |
+
+Anything else requires finding the correct offsets to make it work.
+
+## iPhone 11 (n104ap), iOS 27.0 beta 4
+
+Everything that port needs is in [`work-27.0b4-n104/`](work-27.0b4-n104/): a [README](work-27.0b4-n104/README.md) that is nine ordered steps from firmware download to a booted device, and a [COMMANDS](work-27.0b4-n104/COMMANDS.md) cheatsheet for afterwards.
+
+**Do not follow the tutorial further down this page for it.** That one is for the 11 Pro on beta 2, and several steps have no equivalent, including the APTicket re-dump, the bootstrap installer and the display fix.
+
+Working: WiFi, 46 home screen icons, 266 apps registered, root shell over SSH, apt, Sileo and TrollStore launch, Camera and Photos, personas at boot.
+
+Not working: setting wallpapers, pairing with a Mac, Sileo installs, Safari downloads reaching Files.
+
+Two things about this port are worth knowing before you start, because both cost days to find:
+
+- **The screen is black on every normal boot** until one word in iBSS is patched. USB, SSH and the kernel are all fine behind it, so it does not look like a display bug.
+- **`AppleKeyStoreUserClient::externalMethod` needs a guarded shim, not the usual stub.** Returning unconditional success without writing the output buffer makes MobileKeyBag report "never unlocked since boot" permanently, which is what breaks the photo library, wallpapers and pairing.
+
+Both are explained in that directory's README.
+
+**Contributions welcome.** The open items are written up under [Open problems](work-27.0b4-n104/README.md#open-problems), each with the root cause where it is known, the offsets already derived, what has been ruled out, and the specific next step. Two are diagnosed down to a one-word fix and blocked only on delivery. Issues and PRs are both fine, and so is telling us we are wrong about something.
+
+## iPhone 11 Pro / Pro Max, iOS 27.0 beta 2
+
+The original port, by [34306](https://github.com/34306). The [Tutorial](#tutorial) below is written for these devices, and is his work along with everything it references in `patches/`.
+
+[Hardware setup](#hardware-setup) applies to both ports: same rig, same wiring.
 
 ## Hardware setup
 
@@ -26,7 +60,14 @@ I use a **Raspberry Pi Pico 2** with RP2350 and a cut lightning cable:
 
 ## Downloads
 
-- iOS 27.0 beta 2 for iPhone 11 Pro IPSW from [Apple's website](https://updates.cdn-apple.com/2026SpringSeed/fullrestores/140-20242/CD53E584-98E6-4560-B847-D8D5027223E8/iPhone12,3,iPhone12,5_27.0_24A5370h_Restore.ipsw).
+**iPhone 11, 27.0 beta 4.** No direct link, because seed URLs rotate. `get_fw.py` resolves it from the device and build ID, downloads it, then checks the extracted `BuildManifest.plist` really says `24A5390f` / `iPhone12,1` / `n104ap` before letting the build continue:
+
+```shell
+brew install blacktop/tap/ipsw
+cd work-27.0b4-n104 && ./get_fw.py
+```
+
+**iPhone 11 Pro, 27.0 beta 2.** IPSW from [Apple's website](https://updates.cdn-apple.com/2026SpringSeed/fullrestores/140-20242/CD53E584-98E6-4560-B847-D8D5027223E8/iPhone12,3,iPhone12,5_27.0_24A5370h_Restore.ipsw).
 
 Install requirements:
 
@@ -34,9 +75,33 @@ Install requirements:
 pip3 install requests pyimg4 pymobiledevice3
 ```
 
-We work inside the `work-27.0b2` folder!
+Work inside `work-27.0b4-n104` for the 11, and `work-27.0b2` for the 11 Pro.
 
 ## Patches added
+
+### iPhone 11 / 24A5390f
+
+That port has its own set, too large to repeat here: 16 tables, around 180 patch words, listed in full in [`work-27.0b4-n104/README.md`](work-27.0b4-n104/README.md). The live source of truth is the code:
+
+```shell
+cd work-27.0b4-n104
+./apply_patches.py --list                 # every table and its patch count
+./apply_patches.py kc-boot kcache.raw     # dry run against a payload, writes nothing
+```
+
+Every patch carries the word it expects to overwrite and refuses to write if the file does not contain it, so a wrong build or a wrong file aborts at the desk instead of on the phone.
+
+Three are worth knowing about even if you never open that directory:
+
+| Component | Offset | Value | Notes |
+| :---- | :---- | :---- | :---- |
+| iBSS display init | `0x351c8` | `52800020` (`movz w0,#1`) | **n104 only.** Without it the screen is black on every normal boot while USB, SSH and the kernel are all fine. iBSS **only**, never iBEC |
+| `AppleKeyStoreUserClient::externalMethod` | `0x213ac00` | guarded selector-7 shim | Not the usual `mov x0,#0; ret`. That returns success without writing the output buffer, so MobileKeyBag reads "never unlocked since boot" forever and Photos, wallpapers and pairing all break. The shim synthesises a valid lock state for selector 7 and leaves every other selector alone |
+| boot-args | — | `backlight-level=1024` | n104 is an LCD and needs the backlight driven explicitly. The d421 OLED does not |
+
+> Offsets are build-specific to **24A5390f / iPhone12,1 / n104ap**. They are not the same as the b2 numbers below.
+
+### iPhone 11 Pro / 24A5370h
 
 The original source from wh1te4ever included a lot of patches, you can read it in the code.
 
@@ -59,6 +124,8 @@ The userland byte patches are scripted in [`patches/userland_patches.py`](patche
 > Offsets are build-specific to **24A5370h / iPhone12,3**. Re-verify them in IDA for any other build.
 
 ## Tutorial
+
+> **This tutorial is for the iPhone 11 Pro on beta 2.** For the **iPhone 11** on beta 4, follow [`work-27.0b4-n104/README.md`](work-27.0b4-n104/README.md) instead. Several steps below have no equivalent there, and several of its steps have no equivalent here: the APTicket re-dump, the bootstrap installer and the display fix.
 
 Put the device in DFU mode, then plug it into the PWN DFU rig (the Raspberry Pi Pico 2 mentioned above).
 
@@ -161,13 +228,14 @@ done
 
 Enjoy!
 
-![Jailbroken iPhone 11 Pro on iOS 27.0](images/image2.jpg)
 
 ## Credits
 
 I need to acknowledge and credit some awesome projects that I based this work on.
 
-- [**usbliter8-fun**](https://github.com/wh1te4ever/usbliter8-fun) by [**wh1te4ever**](https://github.com/wh1te4ever) for CFW and Ramdisk patched for iOS 27.0 beta 2 (24A5370h)
+- [**usbliter8-fun**](https://github.com/wh1te4ever/usbliter8-fun) by [**wh1te4ever**](https://github.com/wh1te4ever) for CFW and Ramdisk patched for iOS 27.0 beta 2 (24A5370h). The iPhone 11 / beta 4 port in `work-27.0b4-n104` is derived from the beta 3 here
+- [**34306**](https://github.com/34306) (Huy Nguyen) for the fork this one is built on: the tutorial, the `patches/` scripts
+- [**Procursus**](https://github.com/ProcursusTeam) for the rootless bootstrap used by both ports
 - [**khanhduytran0**](https://github.com/khanhduytran0) for idea on DeviceTree and USB Restriction in kernel
 - **img4/img4tool** by [**tihmstar**](https://github.com/tihmstar) for sign IMG4 with APTicket
 - **pyimg4/pymobiledevice3** by [**m1stadev**](https://github.com/m1stadev)/[**doronz88**](https://github.com/doronz88) for Export kernelcache, forward usbmux port
