@@ -141,6 +141,25 @@ sshdev "/bin/mv '$DEV_STAGE/var/jb' '$DEV_JB'" || { print -u2 "[!] move failed";
 # Staging should now be empty; rmdir refuses if it is not, which is the check we want.
 sshdev "/bin/rmdir '$DEV_STAGE/var' '$DEV_STAGE' 2>/dev/null; /bin/rm -f '$DEV_TGZ'; sync" >/dev/null 2>&1
 
+# ---------------------------------------------------------------- apt cache owner
+# Sileo downloads as mobile and only installs as root, so the apt archive directory
+# has to be writable by mobile or every install dies with "Unable to fetch some
+# archives", which reads like a network fault and is not one.
+#
+# The bootstrap ships these 0755 root, but the first root apt run tightens
+# archives/partial to 0700 owned by APT::Sandbox::User, and etc/apt/apt.conf.d/
+# 03sandbox.conf sets that to root. Nothing then loosens it again, so a fresh device
+# always ends up with Sileo unable to write there.
+#
+# Numeric 501:501 rather than mobile:mobile: the ramdisk has no user database, so a
+# name would not resolve. Root keeps write access regardless of owner, so CLI apt is
+# unaffected, and this survives later root apt runs (verified on 24A5390f).
+print "[*] making the apt archive dir writable by mobile (Sileo fetches as mobile)"
+sshdev "/bin/mkdir -p '$DEV_JB/var/cache/apt/archives/partial' && \
+        /usr/sbin/chown 501:501 '$DEV_JB/var/cache/apt/archives' \
+                                '$DEV_JB/var/cache/apt/archives/partial'" \
+    || print -u2 "[!] chown of the apt archive dir failed; Sileo installs will fail until it is fixed"
+
 # ---------------------------------------------------------------- verify
 print "\n[*] verifying on the device\n"
 fail=0
@@ -161,6 +180,10 @@ chk "sudo owned by root"          "[ -O '$DEV_JB/usr/bin/sudo' ] && echo root ||
 chk "symlinks preserved (sh)"     "[ -L '$DEV_JB/usr/bin/sh' ] && echo yes || echo no"          "yes"
 chk "dpkg present"                "[ -x '$DEV_JB/usr/bin/dpkg' ] && echo yes || echo no"        "yes"
 chk "apt present"                 "[ -x '$DEV_JB/usr/bin/apt' ] && echo yes || echo no"         "yes"
+# stat -f %u, not ls: the ramdisk ships no passwd or group file, so ls would print the
+# numeric id anyway, and -O only ever tests against the effective uid, which is root.
+chk "apt archives uid 501 (mobile)" "stat -f %u '$DEV_JB/var/cache/apt/archives'"                "501"
+chk "apt partial uid 501 (mobile)"  "stat -f %u '$DEV_JB/var/cache/apt/archives/partial'"        "501"
 chk "staging cleaned up"          "[ -e '$DEV_STAGE' ] && echo left || echo clean"              "clean"
 chk "archive cleaned up"          "[ -e '$DEV_TGZ' ] && echo left || echo clean"                "clean"
 

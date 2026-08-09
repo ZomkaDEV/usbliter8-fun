@@ -226,9 +226,15 @@ apt update
 apt install <pkg>
 ```
 
-`apt` works. Sileo launches but still cannot install, getting stuck at the queue stage. Use `apt`.
+Both `apt` and Sileo work.
 
-The `spawn_validate_persona` explanation for this is **out of date**. That gate is patched and non-root persona escalation now works, confirmed as `mobile` with `sudo -u mobile spawnprobe`, and TrollStore performs the same escalation successfully. Whatever stops Sileo is above the kernel and has not been identified. See README open problem 3.
+If Sileo installs fail with `Unable to fetch some archives`, it is not a network fault. Sileo downloads as `mobile` and only installs as root, so the apt archive dir has to be writable by `mobile`:
+
+```sh
+chown 501:501 /var/jb/var/cache/apt/archives /var/jb/var/cache/apt/archives/partial
+```
+
+`install_bootstrap.sh` does this now, so it should only affect devices provisioned before that. Root keeps write access regardless of owner, which is why CLI `apt` never shows the problem.
 
 If Sileo reports a package as unavailable, kill it, reopen, and pull to refresh.
 

@@ -162,7 +162,7 @@ Device in SSHRD:
 
 Steps it runs: `mounts cache jbtools sileo resolv apps verify`. It refuses to run against a normal boot.
 
-`sileo` installs the bundle built in step 7. Its binaries are re-signed ad-hoc with no `get-task-allow`, and `giveMeRoot` keeps its setuid bit; without that Sileo cannot escalate and installs fail silently.
+`sileo` installs the bundle built in step 7. Its binaries are re-signed ad-hoc with no `get-task-allow`, and `giveMeRoot` keeps its setuid bit; without that Sileo cannot escalate and installs fail silently. Working installs also need the apt archive dir owned by `mobile`, which step 6 handles.
 
 TrollStore is deliberately not installed here. It used to be, as the full TrollStore renamed to `TrollStoreLite.app`, whose helper cannot register apps on iOS 27: `registerApplicationDictionary:` is a stub that always returns NO, and the replacement API is entitlement-gated. It now installs after first boot from a deb built from a patched fork, which also keeps it off the sealed System volume so it can be updated without another DFU trip. See COMMANDS.md section 5.
 
@@ -345,13 +345,15 @@ With this in place `Photos.sqlite` builds itself about a minute after boot. It d
 
 ## What works
 
-WiFi, 46 home screen icons, 266 apps registered, root shell over SSH, apt, Camera and Photos, Safari including downloads reaching Files, AirDrop, Siri, persona 99 created at boot. Sileo launches but cannot install, see open problem 3.
+WiFi, 46 home screen icons, 266 apps registered, root shell over SSH, apt, Sileo including installs, Camera and Photos, Safari including downloads reaching Files, AirDrop, Siri, persona 99 created at boot.
+
+**Sileo installs.** It fetches as `mobile` and only installs as root, so `/var/jb/var/cache/apt/archives` and its `partial/` have to be owned by uid 501. The bootstrap ships them 0755 root and the first root `apt` run tightens `partial/` to 0700 owned by `APT::Sandbox::User`, which `03sandbox.conf` sets to root, leaving Sileo unable to write there. Every install then fails with `Unable to fetch some archives`, which reads like a network fault and is not one. `install_bootstrap.sh` now chowns both to 501:501 and verifies it.
 
 **Installing and running your own apps.** TrollStore Lite installs an IPA, registers it as a `System` app, and it launches from the home screen. This needs a patched helper: the stock one cannot register anything on iOS 27. See `COMMANDS.md` section 5.
 
 **Escalation from a non-root process.** `posix_spawn` with persona 99 and uid 0 succeeds as `mobile` and the child runs as root. This is the `spawn_validate_persona` patch in `KC_PERSONA`, and it is what makes the TrollStore GUI able to install at all. Verify with `sudo -u mobile spawnprobe`, expecting `[PERSONA99_ROOT] posix_spawn = 0` and a child at `uid=0`.
 
-**Task ports on other processes.** `task_for_pid` returns a live port for `launchd`, `amfid` and ordinary processes, rather than `MACH_PORT_DEAD`. That took three patches, not one: `developer_mode_state` in `KC_AMFI`, plus `TXM_CONSTRAINTS` and `TXM_DEVMODE`, because 15 of the 16 kernel readers inline the developer-mode load instead of calling the accessor. Injection still does not work, see open problem 4.
+**Task ports on other processes.** `task_for_pid` returns a live port for `launchd`, `amfid` and ordinary processes, rather than `MACH_PORT_DEAD`. That took three patches, not one: `developer_mode_state` in `KC_AMFI`, plus `TXM_CONSTRAINTS` and `TXM_DEVMODE`, because 15 of the 16 kernel readers inline the developer-mode load instead of calling the accessor. Injection still does not work, see open problem 3.
 
 WiFi works, but command line DNS needs `/private/etc/resolv.conf`, which the stock image does not ship and which lives on the read-only System volume. The `resolv` step of `sshrd_provision.sh` writes it. If that has not run, or fails, `aptproxy.py` is the fallback: see `COMMANDS.md` section 8.
 
@@ -412,24 +414,7 @@ Not a blocker for development: `/var/db/diagnostics` is readable over root SSH, 
 
 **Anything requiring an Apple ID sign-in also fails**, which is very likely the same root cause rather than a separate bug: the device reports `Activated` because our patch says so, while `ActivationState` and the device key pair were never produced. That is an inference from the shared cause, not something traced end to end, so treat it as a lead. Local features are unaffected, AirDrop and Siri both work.
 
-### 3. Sileo cannot install packages, and the old explanation is now wrong
-
-Installs get stuck at the queue stage and never proceed. `apt` from a shell works, and so does TrollStore, which performs the same escalation.
-
-**The previously documented cause is fixed and is no longer it.** Non-root persona adoption used to return `EPERM`, and `spawn_validate_persona` in the kernel was the right target. `KC_PERSONA` now patches the two `EPERM` branches for a non-root caller requesting uid 0 and gid 0. Confirmed as `mobile`, not root, since root is exempt and proves nothing:
-
-```
-[PERSONA99_ROOT] set_persona(99) = 0   set_uid(0) = 0   set_gid(0) = 0
-[PERSONA99_ROOT] posix_spawn = 0 (OK)  child exit=0     child uid=0(root)
-```
-
-Reproduce with `sudo -u mobile spawnprobe`. The TrollStore GUI was blocked by exactly this and now works, which is independent evidence the escalation path is genuinely open.
-
-So whatever stops Sileo is above the kernel. Nothing has been ruled out yet, and no work has gone into it since the persona fix landed.
-
-**Next step, cheapest first.** Sileo has no usable log here because there is no `/usr/bin/log`, so drive its pieces by hand from a `mobile` shell and find which one fails: run `/Applications/Sileo.app/giveMeRoot` directly and check it returns uid 0, then run the same `apt-get` invocation Sileo would issue and see whether it is a lock, a DNS failure inside Sileo's context, or a spawn that never happens. Only then look at Sileo's own queue code.
-
-### 4. Tweak injection stops at W^X
+### 3. Tweak injection stops at W^X
 
 System-wide tweak injection does not work. Three gates were removed to get here and all three are confirmed, so this is a genuinely narrower problem than it was, not an untouched one.
 
@@ -441,11 +426,11 @@ System-wide tweak injection does not work. Three gates were removed to get here 
 
 **Deliberately parked, and the next step is measurement rather than patching.** Two read-only checks first: `mach_vm_region` on the allocation to see what `max_protection` actually permits, and whether an anonymous `MAP_JIT` mapping can reach RX at all on this build. Patching SPTM or global W^X before knowing that would be premature, and unlike the earlier patches it would weaken enforcement process-wide rather than open one specific gate.
 
-### 5. `MKBGetDeviceLockState` still returns 0
+### 4. `MKBGetDeviceLockState` still returns 0
 
 The selector-7 shim fixes `MKBDeviceUnlockedSinceBoot` and `MKBUserUnlockedSinceBoot`. `MKBGetDeviceLockState` reaches AppleKeyStore through `__get_device_lock_state` with a larger structure and reads `[sp,#0x4]`, a path the shim does not touch. Nothing currently depends on it, but anything that starts depending on it will see an incoherent keybag.
 
-### 6. `proc_ignores_content_protection` was never ported
+### 5. `proc_ignores_content_protection` was never ported
 
 Upstream's fork carries `patch(0x340c538, mov x0,#1)` on b2. It is absent from wh1te4ever's b3 and from this port. A static match suggests **b4 `0x341b5fc`**, but that offset came from an outside review and **we have not verified it ourselves**, so treat it as a lead rather than a fact.
 
