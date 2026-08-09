@@ -20,7 +20,13 @@ set -e
 BASE="$(cd "$(dirname "$0")" && pwd)"
 cd "$BASE"
 
-SSHPASS="$BASE/tools/sshpass"
+# Host-side helper binaries. Resolved from $BASE rather than the working
+# directory so the script works when invoked by an absolute path. Where tools/
+# sits is the only thing that differs between the repo and research copies, so
+# it is resolved once here rather than spelled out at each call site.
+TOOLS="$BASE/../tools"
+
+SSHPASS="$TOOLS/sshpass"
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=25 -p 2222"
 DEV="root@localhost"
 PW=alpine
@@ -66,7 +72,7 @@ put() {
     [ "$_got" = "$_sz" ] || die "short write: $2 is $_got bytes, expected $_sz"
 }
 
-STEPS="mounts cache jbtools sileo trollstore resolv apps verify"
+STEPS="mounts cache jbtools sileo resolv apps verify"
 
 usage() {
     echo "steps: $STEPS"
@@ -74,7 +80,8 @@ usage() {
     echo "  cache    deploy the launchd service cache (dropbear + jbboot)"
     echo "  jbtools  install jbboot.sh, personaalloc, photodiag into /var/jb"
     echo "  sileo      install Sileo (from payload/, built by fetch_payloads.sh)"
-    echo "  trollstore install TrollStore (same source)"
+    # TrollStore is not installed here. It goes on after first boot from a deb,
+    # so it can be updated without another DFU trip. See COMMANDS.md.
     echo "  resolv   write /private/etc/resolv.conf so CLI DNS works"
     echo "  apps     copy the 50 removable system apps into /Applications"
     echo "  verify   check the end state"
@@ -168,15 +175,21 @@ if wants jbtools && [ "$CHECK_ONLY" = 0 ]; then
 fi
 
 # ----------------------------------------------------------------- bundles
-# Sileo and TrollStore both come from payload/, built by fetch_payloads.sh from
-# the upstream releases. They used to be scraped off the device (Sileo via dpkg,
-# then pulled back and re-signed), which made provisioning depend on the device
-# already being half-configured and meant a fresh clone could not reproduce it.
+# Sileo comes from payload/, built by fetch_payloads.sh from the upstream
+# release. It used to be scraped off the device (installed via dpkg, then pulled
+# back and re-signed), which made provisioning depend on the device already being
+# half-configured and meant a fresh clone could not reproduce it.
+#
+# TrollStore used to be installed here too. It is not any more: anything placed
+# in /Applications lives on the sealed System volume and cannot be updated
+# without another DFU trip, and the build that went here was the full TrollStore
+# renamed to TrollStoreLite.app, whose helper cannot register apps on iOS 27.
+# It now installs after first boot from a deb. See COMMANDS.md.
 #
 # Sent as a tar with ownership baked in, because the ramdisk has no chown, and
 # extracted device-side as root so modes survive. giveMeRoot's setuid bit is the
 # one that matters: without it Sileo cannot escalate and installs fail silently.
-for pair in "Sileo.app:sileo" "TrollStoreLite.app:trollstore"; do
+for pair in "Sileo.app:sileo"; do
     bundle=${pair%%:*}; step=${pair#*:}
     wants "$step" || continue
     [ "$CHECK_ONLY" = 0 ] || continue
@@ -187,7 +200,7 @@ for pair in "Sileo.app:sileo" "TrollStoreLite.app:trollstore"; do
     fi
     TARB="payload/.work/$bundle.tar.gz"
     mkdir -p payload/.work
-    ../tools/gtar czf "$TARB" --owner=0 --group=80 --numeric-owner --no-xattrs \
+    "$TOOLS/gtar" czf "$TARB" --owner=0 --group=80 --numeric-owner --no-xattrs \
         -C payload "$bundle"
     timeout 900 "$SSHPASS" -p "$PW" ssh $SSHOPT "$DEV" \
         "cd /mnt1/Applications && tar xzf - --numeric-owner" < "$TARB" \
@@ -255,7 +268,7 @@ echo $n' | tr -d ' \r')
             # -C "$SRC" . rather than a word-split $(ls): archives the whole
             # directory without relying on app names being space-free.
             # Entries come out as ./Calculator.app/..., which extracts correctly.
-            ../tools/gtar czf "$TAR" --owner=0 --group=80 --numeric-owner \
+            "$TOOLS/gtar" czf "$TAR" --owner=0 --group=80 --numeric-owner \
                 --no-xattrs --mode='g+w' -C "$SRC" .
         fi
         ok "streaming $(du -h "$TAR" | cut -f1) to /Applications"
@@ -271,7 +284,7 @@ FAIL=0
 note() { printf '    %-24s %s\n' "$1" "$2"; case "$2" in ABSENT|MISSING|*LOST*) FAIL=1 ;; esac; }
 
 note "/Applications bundles"  "$(sh_dev 'ls /mnt1/Applications | wc -l' | tr -d ' \r')"
-for b in Sileo.app TrollStoreLite.app; do
+for b in Sileo.app; do
     note "$b" "$(sh_dev "[ -d /mnt1/Applications/$b ] && echo present || echo ABSENT" | tr -d '\r')"
 done
 note "giveMeRoot setuid" "$(sh_dev '[ -u /mnt1/Applications/Sileo.app/giveMeRoot ] && echo OK || echo LOST' | tr -d '\r')"

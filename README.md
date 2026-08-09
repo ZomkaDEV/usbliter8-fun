@@ -21,9 +21,9 @@ Everything that port needs is in [`work-27.0b4-n104/`](work-27.0b4-n104/): a [RE
 
 **Do not follow the tutorial further down this page for it.** That one is for the 11 Pro on beta 2, and several steps have no equivalent, including the APTicket re-dump, the bootstrap installer and the display fix.
 
-Working: WiFi, 46 home screen icons, 266 apps registered, root shell over SSH, apt, Sileo and TrollStore launch, Camera and Photos, personas at boot.
+Working: WiFi, 46 home screen icons, 266 apps registered, root shell over SSH, apt, TrollStore Lite installs apps that register and launch, root escalation from a non-root process, task ports on other processes, Camera and Photos, Safari downloads reaching Files, AirDrop, Siri, personas at boot.
 
-Not working: setting wallpapers, pairing with a Mac, Sileo installs, Safari downloads reaching Files.
+Not working: setting wallpapers, pairing with a Mac, anything needing an Apple ID sign-in, Sileo installs, tweak injection.
 
 Two things about this port are worth knowing before you start, because both cost days to find:
 

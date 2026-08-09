@@ -19,17 +19,30 @@
 #   Sileo ships flags=0x0 "no signature" with ZERO entitlements, because a real
 #   jailbreak grants them via trust cache plus an amfid patch. As shipped it
 #   dies on '/var/jb/usr/lib/libzstd.1.dylib (blocked by sandbox)'.
-#   TrollStore ships a CoreTrust-bypass signature targeting a long-fixed bug,
-#   which AMFI SIGKILLs on iOS 27. Its bypass is redundant here anyway: our
-#   AMFIIsCDHashInTrustCache patch already trusts every hash.
-#   get-task-allow is stripped from everything: AMFI kills ad-hoc binaries
-#   carrying it.
+#   get-task-allow is never granted: AMFI kills ad-hoc binaries carrying it, so
+#   Sileo's replacement entitlement set is written from scratch rather than
+#   filtered from what it shipped with.
+#
+# TrollStore is deliberately NOT built here any more. It used to download
+# opa334's TrollStore.tar, re-sign it, and rename the bundle to
+# TrollStoreLite.app, which meant the device got the FULL build wearing a Lite
+# name, with a helper that cannot register apps on iOS 27:
+#   - registerApplicationDictionary: is a stub that always returns NO
+#   - its replacement is entitlement-gated and the stock helper lacks the keys
+#   - ldid was looked up on the wrong prefix
+# It now installs after first boot from a deb, which also means it can be
+# updated without another DFU trip, unlike anything placed on the sealed
+# System volume. See COMMANDS.md, "TrollStore Lite (after first boot)".
 
 set -e
 BASE="$(cd "$(dirname "$0")" && pwd)"
 cd "$BASE"
 
-LDID="$BASE/tools/ldid_macosx_arm64"
+# Host-side helper binaries. Where tools/ sits is the only thing that differs
+# between the repo and research copies, so it is resolved once here.
+TOOLS="$BASE/../tools"
+
+LDID="$TOOLS/ldid_macosx_arm64"
 IPSW_ROOT=/tmp/ios27-rootfs           # decrypted root filesystem, mounted
 OUT="$BASE/payload"
 WORK="$BASE/payload/.work"
@@ -39,9 +52,6 @@ SILEO_DEB="org.coolstar.sileo_${SILEO_VER}_iphoneos-arm64.deb"   # arm64 == root
 SILEO_URL="https://github.com/Sileo/Sileo/releases/download/${SILEO_VER}/${SILEO_DEB}"
 SILEO_SHA=8e3c90e5a7d32f4ca207a0ac30d3cfa8   # first 32 of sha256, checked below
 
-TS_VER=2.1.1
-TS_URL="https://github.com/opa334/TrollStore/releases/download/${TS_VER}/TrollStore.tar"
-
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 ok()   { printf '    [+] %s\n' "$1"; }
 skip() { printf '    [=] %s\n' "$1"; }
@@ -50,23 +60,9 @@ die()  { printf '    [!] %s\n' "$1"; exit 1; }
 [ -x "$LDID" ] || die "ldid not found at $LDID"
 mkdir -p "$OUT" "$WORK"
 
-WANT="${*:-sileo trollstore helpers cache}"
+WANT="${*:-sileo helpers cache}"
 wants() { case " $WANT " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-# Strip get-task-allow from an entitlements plist and write a clean copy.
-strip_gta() {
-    python3 - "$1" "$2" <<'PY'
-import plistlib, sys
-src, dst = sys.argv[1], sys.argv[2]
-d = plistlib.load(open(src, "rb"))
-dropped = [k for k in list(d) if "get-task-allow" in k or k == "task_for_pid-allow"]
-for k in dropped:
-    del d[k]
-d.pop("keychain-access-groups", None)   # needs a real team prefix, meaningless ad-hoc
-plistlib.dump(d, open(dst, "wb"))
-print(f"        dropped {dropped}" if dropped else "        nothing to drop")
-PY
-}
 
 # ------------------------------------------------------------------- sileo
 if wants sileo; then
@@ -149,36 +145,6 @@ PY
     ok "payload/Sileo.app ready ($(codesign -dv "$OUT/Sileo.app/Sileo" 2>&1 | grep -o 'flags=0x[0-9a-f]*([a-z]*)'))"
 fi
 
-# --------------------------------------------------------------- trollstore
-if wants trollstore; then
-    say "TrollStore $TS_VER"
-    tar="$WORK/TrollStore.tar"
-    [ -f "$tar" ] || curl -sL --fail -o "$tar" "$TS_URL" || die "download failed: $TS_URL"
-    rm -rf "$WORK/ts" && mkdir -p "$WORK/ts"
-    tar xf "$tar" -C "$WORK/ts"
-    APP="$WORK/ts/TrollStore.app"
-    [ -d "$APP" ] || die "TrollStore.app not found in the tarball"
-
-    # Both binaries must be re-signed. Signing only the app leaves the helper
-    # with its bypass signature, and TrollStore SIGKILLs the moment it spawns it.
-    for b in TrollStore trollstorehelper; do
-        [ -f "$APP/$b" ] || die "$b missing from the bundle"
-        codesign -d --entitlements :- "$APP/$b" 2>/dev/null > "$WORK/$b.raw.ent" || true
-        if [ -s "$WORK/$b.raw.ent" ]; then
-            strip_gta "$WORK/$b.raw.ent" "$WORK/$b.ent"
-        else
-            printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n' > "$WORK/$b.ent"
-        fi
-        ident=$( [ "$b" = TrollStore ] && echo com.opa334.TrollStore || echo trollstorehelper )
-        "$LDID" -I"$ident" -S"$WORK/$b.ent" -Cadhoc "$APP/$b"
-        ok "$b re-signed ad-hoc as $ident"
-    done
-
-    # upstream's COMMANDS.md expects the bundle at /Applications/TrollStoreLite.app
-    rm -rf "$OUT/TrollStoreLite.app" && cp -R "$APP" "$OUT/TrollStoreLite.app"
-    ok "payload/TrollStoreLite.app ready"
-fi
-
 # ------------------------------------------------------------------- cache
 # Build the launchd service cache from the IPSW, not from the device. It used
 # to be pulled off a live phone, which meant you needed an already-provisioned
@@ -226,7 +192,6 @@ fi
 
 say "summary"
 for p in "$OUT/Sileo.app/Sileo" "$OUT/Sileo.app/giveMeRoot" \
-         "$OUT/TrollStoreLite.app/TrollStore" "$OUT/TrollStoreLite.app/trollstorehelper" \
          photodiag/photodiag spawnprobe/personaalloc appreg/appreg; do
     if [ -f "$p" ]; then
         # "$BASE" quoted separately inside ${..}: unquoted it is treated as a

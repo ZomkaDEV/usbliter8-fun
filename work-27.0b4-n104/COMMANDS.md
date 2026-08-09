@@ -115,7 +115,9 @@ mkdir -p /mnt1 /mnt2
 ./sshrd_provision.sh cache jbtools       # only these steps
 ```
 
-Steps: `mounts cache jbtools sileo trollstore resolv apps verify`.
+Steps: `mounts cache jbtools sileo resolv apps verify`.
+
+TrollStore is not one of them any more. It installs after first boot, see section 5.
 
 Missing payload binaries are skipped rather than treated as errors, so check the output. A silently absent `personaalloc` shows up later as a persona that never appears, not as a failure.
 
@@ -130,12 +132,61 @@ killall -9 SpringBoard                   # respring
 
 `uicache -p` cannot register anything on iOS 27. Only `-a` works, and only for bundles in `/Applications`.
 
+**Stop running `uicache -a -f` once TrollStore is installed.** It re-registers every bundle it finds as a *User* app, which silently downgrades everything under `/var/containers` from `System` to `User`. Those apps then fail to launch and their icons disappear, which looks like an unrelated SpringBoard problem. Recover with:
+
+```sh
+trollstorehelper refresh                 # puts them back to System
+```
+
+It is safe on a fresh device, before any TrollStore apps exist. After that, use `trollstorehelper refresh` instead.
+
 Check the boot job did its work:
 
 ```sh
 cat /var/mobile/jbboot.log               # written by boot/jbboot.sh each boot
 personaalloc                             # expect "YES: id=99"
 ```
+
+### TrollStore Lite, after first boot
+
+Not installed by provisioning. It goes on here instead, so it lives in `/var/containers` rather than on the sealed System volume and can be updated without another DFU trip.
+
+Needs `ldid`, which is not in the bootstrap, so this step needs working DNS (section 8):
+
+```sh
+apt install -y ldid
+```
+
+Get the package from the fork's release page, on the Mac:
+
+<https://github.com/Xplo8E/TrollStore27/releases>
+
+```sh
+com.opa334.trollstorehelper27_2.1.1-ios27+2_iphoneos-arm64.deb   # the helper, installs the app
+TrollStoreLite-ios27.ipa                                         # the app on its own, optional
+SHA256SUMS                                                       # check what you downloaded
+```
+
+Then push it and let it install itself. `scp` does not work on this device, there is no `sftp-server`, so use an SSH redirect:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+ssh -p 2222 root@localhost "cat > /var/tmp/ts27.deb" < com.opa334.trollstorehelper27_2.1.1-ios27+2_iphoneos-arm64.deb
+ssh -p 2222 root@localhost "apt install -y /var/tmp/ts27.deb"
+```
+
+The package installs the helper to `/var/jb/usr/bin/trollstorehelper` and its `postinst` uses that helper to install the app, so registration goes through the patched code path rather than `uicache`. Expect `TrollStore Lite installed.` and an app registered as `System`.
+
+Confirm:
+
+```sh
+dpkg -l | grep trollstore                # expect ii com.opa334.trollstorehelper27
+lsprobe --lookup com.opa334.TrollStoreLite   # expect applicationType: System
+```
+
+The stock TrollStore from opa334's releases does **not** work here. Its helper still calls `registerApplicationDictionary:`, which is a stub returning NO on iOS 26+, so apps install and never appear. The package above is that same helper with four fixes on top.
+
+The IPA on that release page is self-bootstrapping if you would rather not use the deb: the helper needed to install it is already inside it at `Payload/TrollStoreLite.app/trollstorehelper`.
 
 ---
 
@@ -175,7 +226,9 @@ apt update
 apt install <pkg>
 ```
 
-`apt` works. Sileo launches but cannot install: non-root persona adoption returns `EPERM`. Use `apt` until `spawn_validate_persona` is dealt with.
+`apt` works. Sileo launches but still cannot install, getting stuck at the queue stage. Use `apt`.
+
+The `spawn_validate_persona` explanation for this is **out of date**. That gate is patched and non-root persona escalation now works, confirmed as `mobile` with `sudo -u mobile spawnprobe`, and TrollStore performs the same escalation successfully. Whatever stops Sileo is above the kernel and has not been identified. See README open problem 3.
 
 If Sileo reports a package as unavailable, kill it, reopen, and pull to refresh.
 
@@ -281,6 +334,9 @@ If it returns 0, `kc-boot` did not apply or the wrong kernelcache booted. `MKBGe
 Each of these cost real time.
 
 - `uicache -p` does not register anything on iOS 27. Use `-a`.
+- `uicache -a -f` is not a safe repair once TrollStore apps exist. It downgrades every bundle under `/var/containers` from `System` to `User` and they stop launching. Use `trollstorehelper refresh`.
+- `registerApplicationDictionary:` does not register anything on iOS 26+. It is a stub that always returns NO, so an app installs, reports success, and never appears. The working call is `registerContainerizedApplicationWithInfoDictionaries:`, and it is entitlement-gated.
+- Testing persona escalation as `root` proves nothing. Root is exempt from the check, so it succeeds whether or not the kernel is patched. Test as `mobile`.
 - `/var/staged_system_apps` is never scanned for registration. Apps must be in `/Applications`.
 - `launchd_no_cache=1` does not restore plist scanning. `launchd_unsecure_cache=1` is the one that matters, and it is read by `/usr/libexec/launchd_cache_loader`, not by `launchd`.
 - launchd cannot exec bootstrap binaries. A boot job needs the system `/bin/sh`, and `/bin` on the System volume has five commands.

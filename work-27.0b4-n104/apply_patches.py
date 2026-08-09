@@ -174,9 +174,67 @@ TXM_QUERYMODULE = [
 # reach `mov w0,0x30a1 ; movk w0,1,lsl 16` == 0x000130A1, the status logged as
 # "selector: 24 | 0xA1 | 0x30 | 1". Nopping both forces the fall-through path, which sets
 # w0 = 0xa1 and branches directly into the epilogue, past the error assignment.
+# The restricted task-port/debugger entitlement validator, also under selector 24
+# (RegisterCodeSignature), is a separate function at 0x3F598. It walks a six-entry table
+# at VA 0xFFFFFFF01701CCD0 and rejects the signature if the binary claims ANY of:
+#
+#     [0] get-task-allow                 [3] com.apple.system-task-ports
+#     [1] com.apple.private.cs.debugger  [4] com.apple.system-task-ports.control
+#     [2] task_for_pid-allow             [5] com.apple.system-task-ports.token.control
+#
+# Loop body is 0x3F60C..0x3F634. w19 preloads 0x000130A2 and gains 0x10000 per iteration,
+# so a rejection returns 0x00NN30A2, logged as "selector: 24 | 0xA2 | 0x30 | N".
+# `tst w0,#0xff00 ; b.eq` takes the error exit when the entitlement IS present. NOPing the
+# branch lets all six iterations run; the loop falls out at 0x3F638 to 0x3F5C4, which sets
+# w19 = 0xa2 and returns success. x21 still steps 8 to 0x30, so the count cannot run away.
+#
+# This is the gate that survived the developer_mode_state() kernelcache patch: binaries
+# carrying these keys were SIGKILLed at exec with no log at all, because the rejection is
+# in TXM rather than AMFI. CONFIRMED on device: all six now exec (RC 0, previously 137).
+#
+# Trusted because two methods agreed. On-device bisection marked get-task-allow,
+# task_for_pid-allow, com.apple.system-task-ports and .control fatal one at a time, and
+# this table holds exactly those four plus two never tested.
 TXM_CONSTRAINTS = [
+    Word(0x3F624, 0x54FFFD20, NOP,
+         "was b.eq (reject six restricted task-port/debugger entitlements)"),
     Word(0x3F690, 0x540000A3, NOP, "was b.lo (skip toward 0x000130A1 error path)"),
     Word(0x3F698, 0xB4000069, NOP, "was cbz x9 (skip toward 0x000130A1 error path)"),
+]
+
+# Developer mode: make TXM publish it as TRUE. CONFIRMED on device.
+#
+# TXM computes developer-mode state and publishes a byte in the structure at VA
+# 0xFFFFFFF017084DB0 (x19 is loaded with it at 0x2BA54, the same structure
+# TXM_SECURECHANNEL touches at 0x2BCD8). XNU receives that address over selector 2 and
+# caches the pointer at 0xFFFFFFF007C14060; 16 kernel sites then load it and read the byte.
+#
+# WHY THIS AND NOT ONLY THE KERNEL ACCESSOR. KC_AMFI forces developer_mode_state() -> true
+# and that fixed AMFI's gates. But only ONE of the 16 readers is that accessor; the other
+# 15 inline the load. task_conversion_eval is one of them:
+#
+#     0x3223770  adrp x8, 0xfffffff007c14000
+#     0x3223774  ldr  x8, [x8, #0x60]
+#     0x322377C  ldrb w8, [x8]
+#     0x3223780  tbnz w8, #0, <permissive>   ; reads the real byte, still 0
+#     0x3223784  cmp  x0, x1
+#     0x3223788  b.eq <permissive>           ; caller == victim, why self worked
+#
+# which is exactly why task_for_pid returned MACH_PORT_DEAD for every process except our
+# own while AMFI's own gate allowed. Fixing the source byte repairs all 16 at once.
+# Measured after boot: launchd, amfid and a foreign ad-hoc helper all return live control
+# ports and task_info succeeds on each.
+#
+# WHY THE tbz AND NOT THE FINAL strb. Patching the final store would publish true while
+# TXM's internal propagation had already received false. The fallthrough here is already
+# `mov w20, #1 ; b <publish>`, so NOPing the branch sends true through TXM's existing
+# secure-channel propagation and on to the XNU-visible byte.
+#
+# Normal boot only. The restore chain has no use for developer mode, and this is a real
+# widening of what the device permits, so it is kept out of txm-restore deliberately.
+TXM_DEVMODE = [
+    Word(0x2BA58, 0x36000069, NOP,
+         "was tbz w9,#0 (skip 'mov w20,#1' -> publish dev mode true)"),
 ]
 
 # allowedBeforeSecureChannelOperational -> always true. Patched right after the `bti c`
@@ -239,11 +297,53 @@ KC_AMFI = [
     # PE_i_can_has_debugger -> 1
     Word(0x3A1C748, 0x90FE9248, 0xD2800020, "PE_i_can_has_debugger: mov x0, #1"),
     Word(0x3A1C74C, 0xB40000E0, RET, "  ret"),
+    # developer_mode_state -> true. Distinct from PE_i_can_has_debugger above.
+    #
+    # AMFI calls this accessor while walking restricted entitlements; when it returns
+    # false, get-task-allow, task_for_pid-allow and the system-task-ports family
+    # invalidate the signature before the process reaches main. AMFI's task_for_pid()
+    # authorisation at 0x1F3C104 consults it independently at 0x1F3C21C, so patching only
+    # the entitlement-walk branch would allow exec and still deny the task-port operation.
+    # Both of those were confirmed on device.
+    #
+    # NOTE: this fixes only ONE of the 16 kernel sites that read developer-mode state. The
+    # other 15 inline the load (`adrp x8, 0xfffffff007c14000 ; ldr x8,[x8,#0x60] ; ldrb`)
+    # and never see it. task_conversion_eval at 0x3223770 is one of them, which is why
+    # task ports stayed dead until TXM_DEVMODE made TXM publish the real byte as true.
+    # Kept alongside TXM_DEVMODE rather than removed: harmless, and it is the reason the
+    # AMFI-side gates pass.
+    Word(0x376351C, 0xB0FEA568, 0x52800020, "developer_mode_state: mov w0, #1"),
+    Word(0x3763520, 0xF9403108, RET, "  ret"),
     # postValidation: cmp w0,2 -> cmp w0,w0, so the following b.ne is never taken.
     Word(0x1F3C750, 0x7100081F, 0x6B00001F, "postValidation: cmp w0,2 -> cmp w0,w0"),
     # _check_dyld_policy_internal: two calls replaced by 'return 1'.
     Word(0x1F3CCB0, 0x94006170, 0x52800020, "check_dyld_policy_internal: bl -> mov w0,#1"),
     Word(0x1F3CCBC, 0x97FFDF2B, 0x52800020, "check_dyld_policy_internal: bl -> mov w0,#1"),
+]
+
+# spawn_validate_persona: let an entitled non-root caller request persona UID/GID 0.
+#
+# Source-semantic match against XNU kern_exec.c, then confirmed in this b4 kernelcache:
+#   - checks com.apple.private.persona-mgmt, returning EPERM if absent
+#   - validates group count, returning EINVAL
+#   - persona_lookup(pspi_id), returning ESRCH if absent
+#   - rejects a non-root caller when pspi_uid == 0 OR pspi_gid == 0
+#
+# The two words below are exactly those final sibling rejects. Both branch to the same
+# `mov w20,#1` result; NOPing them falls through to `mov w20,#0`. The entitlement,
+# group-count and persona-existence checks remain unchanged.
+#
+# Boundary check: entry VA 0xfffffff00a714d40 (file 0x3710d40) is PACIBSP and IDA marks
+# it as a separate function called from the posix_spawn persona-info copyin path. Unlike
+# the usual boundary heuristic, the preceding word is not RET/RETAB: it is the final BL
+# to the non-returning panic/assert routine of the previous function. Treating that BL as
+# a normal return would fall through into a second PACIBSP prologue with the old frame,
+# which is impossible; this is a real function boundary, not a mid-function false match.
+KC_PERSONA = [
+    Word(0x3710DEC, 0x340000E8, NOP,
+         "spawn_validate_persona: was cbz pspi_uid, EPERM; allow UID 0"),
+    Word(0x3710DF4, 0x340000A8, NOP,
+         "spawn_validate_persona: was cbz pspi_gid, EPERM; allow GID 0"),
 ]
 
 KC = ("kernelcache payload", 68091904,
@@ -762,7 +862,7 @@ TABLES = {
     # so isDeviceInRestoreMode() is genuinely true there and needs no help.
     # KC_SANDBOX is normal-boot only. The restore chain never touches /var/jb, and upstream
     # likewise applies these in get_boot.py and not in make_cfw.py.
-    "kc-boot": (KC, KC_KERNELNAME + KC_PANICS + KC_AMFI
+    "kc-boot": (KC, KC_KERNELNAME + KC_PANICS + KC_AMFI + KC_PERSONA
                 + KC_SEP + KC_CREDENTIALMANAGER + KC_USB_RESTRICTED + KC_SANDBOX),
     # Diagnostic build. Keeps the anti-hang AKS fixes but omits the panic silencers and
     # the whole AppleCredentialManager block, so a failure panics and writes a log to
@@ -770,7 +870,7 @@ TABLES = {
     # silently. Not expected to boot; expected to explain why it does not.
     "kc-diag": (KC, KC_KERNELNAME + KC_PANICS + KC_AMFI + KC_AKS),
     "txm-restore": (TXM, TXM_QUERYMODULE + TXM_CONSTRAINTS),
-    "txm-boot": (TXM, TXM_QUERYMODULE + TXM_CONSTRAINTS + TXM_SECURECHANNEL),
+    "txm-boot": (TXM, TXM_QUERYMODULE + TXM_CONSTRAINTS + TXM_SECURECHANNEL + TXM_DEVMODE),
     "ibss-restore": (IBSS, VALIDATE + bootargs("-v wdt=-1 rd=md0 -restore")),
     "ibss-ramdisk": (IBSS, VALIDATE + bootargs("rd=md0 -v wdt=-1 debug=0x2014e")),
     # serial=3 dropped: it routes the console to a UART we have no cable for, so it can
