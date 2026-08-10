@@ -33,6 +33,8 @@ brew install python@3.14                   # see the note below
 pip3 install pyimg4 requests
 ```
 
+[BUILD IDEVICERESTORE FROM SOURCE!!! BREW DOESN'T HAVE FORMULAS FOR WHAT WE NEED](https://github.com/libimobiledevice/idevicerestore#macos)
+
 About 20 GB free. An RP2350 / Pico 2 running usbliter8. All commands run **from this directory**.
 
 `make_cfw.py`, `get_boot.py`, `get_rd.py` and `tss_proxy_server.py` carry a `#!/usr/bin/env python3.14` shebang, inherited from upstream b2/b3. Nothing in them actually needs 3.14: between them they import only `struct os sys glob subprocess pathlib http.server urllib.request`. If you would rather not install that exact version, either change the four shebangs to `python3` or run them as `python3 ./make_cfw.py`. Everything else here uses plain `python3`.
@@ -79,7 +81,7 @@ Copies the IPSW into `CFW/` (~10 GB, the slow part, resumable), then patches iBS
 The restore needs the TSS proxy running. **`restore_cfw.sh` points `idevicerestore` at `http://127.0.0.1:1337` and fails without it.**
 
 ```sh
-python3 tss_proxy_server.py &      # leave running
+python3 tss_proxy_server.py.       # leave running in another window
 ./restore_cfw.sh                   # ERASES THE DEVICE
 ```
 
@@ -91,11 +93,14 @@ Put the device in pwn DFU first.
 
 **There is deliberately no `t8030_apticket.der` here.** It is bound to your device's ECID *and* to the restore, so a committed one is useless to anyone else and stale for you after the next restore. A stale ticket boots to a black screen.
 
-Boot the SSH ramdisk, find the ticket, pull it back:
+You can get it from logs of tss_proxy_server.py
+
+Boot the SSH ramdisk, mount /mnt6 to /dev/disk1s6, find the ticket, pull it back:
 
 ```sh
 ./get_rd.py && ./boot_rd.sh        # device in pwn DFU
 # on the device, over SSH:
+/sbin/mount_apfs /dev/disk1s6 /mnt6
 find /mnt6 -name sep-firmware.img4
 # pull that file back here as dev_sep.img4, then:
 ../tools/img4tool -e -m t8030_apticket.der dev_sep.img4
@@ -107,16 +112,7 @@ Repeat this after **every** restore.
 
 ## Step 5: skip Setup
 
-Setup crash-loops on a device that cannot activate: each pane does async Apple-server work that never finishes, and skipping one pane just moves the hang to the next.
-
-Pull `Setup.app/Setup` off the mounted System volume, patch it here, put it back. Note `--apply`: without it the script only reports and writes nothing.
-
-```sh
-./patch_setup.py Setup                 # dry run, lists what it would patch
-./patch_setup.py Setup --apply         # writes, keeps a .bak
-```
-
-This patches **every** `-[* controllerNeedsToRun]` to return NO, so all panes are skipped at once. One-time, post-restore.
+TODO... 👀
 
 ---
 
