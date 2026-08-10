@@ -2,6 +2,8 @@
 
 iOS **27.0 beta 4** (`24A5390f`) on **iPhone 11** (`iPhone12,1` / `n104ap`), tethered via the usbliter8 checkm8-class SecureROM exploit.
 
+### ONLY WORKS WITH APPLE SILICON MACS
+
 Everything this port needs is in this directory. The only thing shared with the rest of the repo is `../tools/`.
 
 This file is the setup path, start to finish. Once it is built and flashed, `COMMANDS.md` is the day to day cheatsheet.
@@ -34,6 +36,8 @@ pip3 install pyimg4 requests
 ```
 
 [BUILD IDEVICERESTORE FROM SOURCE!!! BREW DOESN'T HAVE FORMULAS FOR WHAT WE NEED](https://github.com/libimobiledevice/idevicerestore#macos)
+
+Also drop the binary ldid for macOS arm64 in `tools/`!
 
 About 20 GB free. An RP2350 / Pico 2 running usbliter8. All commands run **from this directory**.
 
