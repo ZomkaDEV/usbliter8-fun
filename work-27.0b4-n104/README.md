@@ -436,6 +436,10 @@ Upstream's fork carries `patch(0x340c538, mov x0,#1)` on b2. It is absent from w
 
 It was not needed for Photos, and `dpprobe` showed protected file creation is not the obstacle there. Left unported deliberately: porting it would globally weaken another subsystem and make the next boot ambiguous. Only worth revisiting if something produces an actual protection-class denial.
 
+### 6. Deep sleep doesn't work
+
+During deep sleep, the device hangs and has to be rebooted. This a common issue on tethered downgrades.
+
 ### Also useful, lower stakes
 
 - **No live syslog.** `idevicesyslog` needs pairing and `/usr/bin/log` does not exist on the device. Copy `/var/db/diagnostics` off and read it on the host.
